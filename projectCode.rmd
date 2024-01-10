@@ -1,0 +1,392 @@
+---
+title: "Final Project"
+output: html_document
+author: "C. Beattie, Sam Rudenberg, K. Shah" 
+date: '2023-12-15'
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, error = FALSE, cache = TRUE)
+```
+
+```{r} 
+# Libraries 
+library(dplyr)
+library(tidyr)
+library(mice)
+library(corrplot)
+library(ggplot2)
+
+# Loading CSV
+data = read.csv("~/Desktop/combined_data_500.csv")
+```
+
+
+# Removing rows with NA from data -> stored in complete 
+```{r}
+# Removing rows with NAs 
+complete <- na.omit(data)
+```
+
+
+# Ticker splits (finding row index where it changes to the next stock name)
+```{r} 
+# Separate Ticker name for identification 
+complete = separate(complete, 
+                    col = Ticker, 
+                    into = c("Ticker", "X"), 
+                    sep = "\\.") 
+
+# Finds the row indices where the stock Ticker changes 
+firstOccurrenceIndex = which(!duplicated(complete$Ticker)) 
+
+# Adding the last boundary 
+firstOccurrenceIndex[339] = 15883
+```
+
+
+# subset_rows function 
+```{r} 
+# Function to create subset DF's of individual stocks 
+subset_rows = function(data, x, y) {
+  if (any(is.na(c(x, y))) || x < 1 || y > nrow(data) || x > y) {
+    stop("Invalid row indices.")
+  }
+  return(data[x:y, ])
+}
+```
+
+
+# Standardizing. One loop for each stock (using ticker split)
+```{r}
+# Creating an empty df to add complete rows
+standardized = data.frame(matrix(ncol = ncol(complete), nrow = 0))
+
+# Var to count stocks
+count = 1
+
+# There are 338 stocks; while count is less than 339
+while (count < 339) {
+
+  # Calling subset function
+  stdStock = subset_rows(complete, 
+                         firstOccurrenceIndex[count], 
+                         firstOccurrenceIndex[count+1]-1)
+
+  # For a column in stdStock
+  for(col in 4:ncol(stdStock)) { 
+    base = stdStock[1, col]
+    stdStock[, col] = (stdStock[, col] - base) / abs(base) * 100
+  }
+
+  # Adding stock to completed, standardized DF
+  standardized = rbind(standardized, stdStock)
+
+  # Increment for next stock
+  count = count + 1
+
+}
+```
+
+
+# Adding NAs to data
+```{r}
+# Making a copy 
+addingNAs = standardized
+
+for (row in 1:nrow(standardized)) { 
+  
+      # Random chance values will be removed 
+      rand_int = sample(6, 1)
+  
+      if (rand_int == 5) { 
+    
+        # Specific pattern 1 we found 
+        addingNAs[row, c("PX_LAST", "PE_RATIO", 
+                         "PX_TO_BOOK_RATIO", "CUR_MKT_CAP")] = NA 
+    
+      } 
+  
+      if (rand_int == 6) { 
+        
+        # Specific pattern 2 we found 
+        addingNAs[row, c("BS_TOT_ASSET", "BS_CUR_ASSET_REPORT", "BS_TOT_LIAB2", 
+                          "BS_CUR_LIAB", "SALES_REV_TURN", "EBIT", 
+                          "CF_CASH_FROM_OPER", "CF_CASH_FROM_INV_ACT", 
+                          "CF_CASH_FROM_FNC_ACT", "BS_CASH_NEAR_CASH_ITEM", 
+                          "CAPITAL_EXPEND", "BOOK_VAL_PER_SH", "CASH_FLOW_PER_SH", 
+                          "CUR_RATIO", "PROF_MARGIN", "RETURN_ON_ASSET", 
+                          "IS_EPS", "CUR_MKT_CAP")] = NA
+    
+      }
+      
+}
+```
+
+
+# Mice Models: pmm
+```{r}
+# Making a copy 
+containsNAs <- addingNAs
+
+# PMM Model 
+pmm_model = mice(containsNAs, method = "pmm", m = 4)
+ 
+# Generate imputed data sets 
+pmm_imputed = complete(pmm_model, action = "long", include = TRUE)
+
+# Dropping pre-imputed rows 
+pmm_folds = subset_rows(pmm_imputed, 15883, 79410)
+
+# Selecting numeric data columns 
+pmm_folds = pmm_folds[, 6:26]
+
+# Fold subsets 
+pmm1 = subset_rows(pmm_folds, 1, 15882)
+pmm2 = subset_rows(pmm_folds, 15883, 31764)
+pmm3 = subset_rows(pmm_folds, 31765, 47646)
+pmm4 = subset_rows(pmm_folds, 47647, 63528)
+
+# Combine the subsets into a list
+df_list <- list(pmm1, pmm2, pmm3, pmm4)
+
+# New DF with same dimensions as subsets 
+pmmMean <- data.frame(matrix(NA, nrow = nrow(pmm1), ncol = ncol(pmm1)))
+
+# Calculate the mean of each row,col pair across the four subsets 
+for (i in 1:nrow(pmmMean)) {
+  for (j in 1:ncol(pmmMean)) {
+    pmmMean[i, j] <- mean(sapply(df_list, function(x) x[i, j]))
+  }
+}
+```
+
+
+# Mice Models: rf
+```{r}
+# Making a copy
+containsNAs <- addingNAs
+
+# Random Forest Model 
+rf_model <- mice(containsNAs, method = "rf", m = 4)
+
+# Generate imputed data sets
+rf_imputed = complete(rf_model, action = "long", include = TRUE)
+
+# Converting to DF 
+rf_df = as.data.frame(rf_imputed)
+
+# Dropping pre-imputed rows 
+rf_folds = subset_rows(rf_imputed, 15883, 79410)
+
+# Selecting numeric data columns 
+rf_folds = rf_folds[, 6:26]
+
+# Fold subsets 
+rf1 = subset_rows(rf_folds, 1, 15882)
+rf2 = subset_rows(rf_folds, 15883, 31764)
+rf3 = subset_rows(rf_folds, 31765, 47646)
+rf4 = subset_rows(rf_folds, 47647, 63528)
+
+# Combine the subsets into a list
+df_list <- list(rf1, rf2, rf3, rf4)
+
+# New DF with same dimensions as subsets 
+rfMean <- data.frame(matrix(NA, nrow = nrow(rf1), ncol = ncol(rf1)))
+
+# Calculate the mean of each row,col pair across the four subsets 
+for (i in 1:nrow(rfMean)) {
+  for (j in 1:ncol(rfMean)) {
+    rfMean[i, j] <- mean(sapply(df_list, function(x) x[i, j]))
+  }
+}
+
+```
+
+
+# Mice Models: nn
+```{r} 
+# Making a copy
+containsNAs <- addingNAs
+
+# Norm.nob Model 
+nn_model = mice(containsNAs, method = "norm.nob", m = 4)
+ 
+# Generate imputed data sets 
+nn_imputed = complete(nn_model, action = "long", include = TRUE)
+
+# Dropping pre-imputed rows 
+nn_folds = subset_rows(nn_imputed, 15883, 79410)
+
+# Selecting numeric data columns 
+nn_folds = nn_folds[, 6:26]
+
+# Fold subsets 
+nn1 = subset_rows(nn_folds, 1, 15882)
+nn2 = subset_rows(nn_folds, 15883, 31764)
+nn3 = subset_rows(nn_folds, 31765, 47646)
+nn4 = subset_rows(nn_folds, 47647, 63528)
+
+# Combine the subsets into a list
+df_list <- list(nn1, nn2, nn3, nn4)
+
+# New DF with same dimensions as subsets 
+nnMean <- data.frame(matrix(NA, nrow = nrow(nn1), ncol = ncol(nn1)))
+
+# Calculate the mean of each row,col pair across the four subsets 
+for (i in 1:nrow(nnMean)) {
+  for (j in 1:ncol(nnMean)) {
+    nnMean[i, j] <- mean(sapply(df_list, function(x) x[i, j]))
+  }
+}
+```
+
+
+# Mice Models: nb
+```{r}
+# Making a copy
+containsNAs <- addingNAs
+
+# Norm Boostrapped Model 
+nb_model = mice(containsNAs, method = "norm.boot", m = 4)
+ 
+# Generate imputed data sets 
+nb_imputed = complete(nb_model, action = "long", include = TRUE)
+
+# Dropping pre-imputed rows 
+nb_folds = subset_rows(nb_imputed, 15883, 79410)
+
+# Selecting numeric data columns 
+nb_folds = nb_folds[, 6:26]
+
+# Fold subsets 
+nb1 = subset_rows(nb_folds, 1, 15882)
+nb2 = subset_rows(nb_folds, 15883, 31764)
+nb3 = subset_rows(nb_folds, 31765, 47646)
+nb4 = subset_rows(nb_folds, 47647, 63528)
+
+# Combine the subsets into a list
+df_list <- list(nb1, nb2, nb3, nb4)
+
+# New DF with same dimensions as subsets 
+nbMean <- data.frame(matrix(NA, nrow = nrow(nb1), ncol = ncol(nb1)))
+
+# Calculate the mean of each row,col pair across the four subsets 
+for (i in 1:nrow(nbMean)) {
+  for (j in 1:ncol(nbMean)) {
+    nbMean[i, j] <- mean(sapply(df_list, function(x) x[i, j]))
+  }
+}
+```
+
+
+# Compute RMSE by comparing standardized and filledNAs dataframes 
+```{r} 
+# Function which calculates percent accuracy. 
+# The model's predictions are compared to the what the NA values 
+# are known to be in the standardized DF. 
+
+# "Percent correct" is evaluated based on the range_threshold variable. 
+# For a prediction to "match" its known value from standardized, it must 
+# be within +- range_threshold 
+calc_accuracy <- function(pred_df, range_threshold) {
+  
+  # Saving the standardized and prediction DF's 
+  true <- data.frame(x = unlist(standardized[, 4:24]))
+  pred <- data.frame(y = unlist(pred_df))
+  
+  # Combine into one DF 
+  both <- cbind(true, pred) 
+  
+  both <- both %>%
+    # Ensure columns are numeric
+    mutate(x = as.numeric(x),
+           y = as.numeric(y)) %>% 
+    # If an entry resulted in NaN or Inf, it will be replaced with the median 
+    mutate(x = ifelse(is.na(x), median(x, na.rm = TRUE), x),
+           y = ifelse(is.na(y), median(y, na.rm = TRUE), y)) %>% 
+    # Only keeping values which do not match exactly to compare 
+    # the effectiveness of the NA replacements 
+    filter(x != y)
+  
+  correct_predictions <- sum(abs(both$x - both$y) <= range_threshold)
+
+  total_predictions <- nrow(both)
+  
+  accuracy <- correct_predictions / total_predictions * 100
+  
+  # cat("Accuracy (within +/-", range_threshold, "%):", accuracy, "%\n")
+  
+  return(accuracy)
+
+}
+
+# Create a data frame to store Model, Threshold, and Accuracy 
+plot_df <- data.frame(
+  Model = character(80),
+  Thresh = numeric(80),
+  Accuracy = numeric(80)
+)
+
+# Counter for index 
+count = 1
+
+# The sequence variable serves as the threshold_range input 
+for (i in seq(10, 200, by = 10)) {
+  
+  # PMM: Name, Threshold, and Mean accuracy 
+  plot_df[count, 1] = "pmm" 
+  plot_df[count, 2] = i 
+  plot_df[count, 3] = calc_accuracy(pmmMean, i)
+  
+  # RF: ""
+  plot_df[count+1, 1] = "rf"
+  plot_df[count+1, 2] = i
+  plot_df[count+1, 3] = calc_accuracy(rfMean, i)
+  
+  # NN: ""
+  plot_df[count+2, 1] = "nn"
+  plot_df[count+2, 2] = i
+  plot_df[count+2, 3] = calc_accuracy(nnMean, i)
+  
+  # NB: ""  
+  plot_df[count+3, 1] = "nb"
+  plot_df[count+3, 2] = i
+  plot_df[count+3, 3] = calc_accuracy(nbMean, i)
+  
+  # Increment by 4 to prevent overwriting 
+  count = count + 4
+  
+}
+```
+
+
+# Create Visualizations (corrplot)
+```{r}
+# Corrplot. Used to observe the effectiveness and relationships of predictors 
+
+cormat = cor(select(complete, -Ticker, -X, -date))
+corrplot.mixed(cormat, tl.pos = 'lt', tl.cex = 0.5, number.cex = 0.55)
+```
+
+
+# Create Visualizations (ggplot)
+```{r}
+## ggplot. Used to compare the effectiveness of predicting NAs across models 
+
+ggplot(data = plot_df, mapping = aes(x = Thresh, y = Accuracy, color = Model)) +
+  geom_line(size = 1.25) +
+  theme_bw() +
+  scale_color_manual(values = c("red", "royalblue", "darkgreen", "orange"),
+                     labels = c("Norm.Boot", "Norm.Nob", 
+                                "Predictive Mean Matching", "Random Forest")) +
+  scale_x_continuous(breaks = seq(0, 200, by = 20)) +
+  scale_y_continuous(breaks = seq(0, 50, by = 10)) +
+  labs(x = "Threshold Intervals", y = "Mean Accuracy",
+       title = "Mice Model Accuracy by Low/High Cutoffs")
+```
+
+
+
+
+
